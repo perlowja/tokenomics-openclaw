@@ -26,6 +26,26 @@ export interface ModelPrice {
   cache_write_usd_per_mtok?: number;
   reasoning_usd_per_mtok?: number;
   source?: string;
+  /** Off-peak (time-of-day) rates + UTC window (e.g. DeepSeek). When present and
+   * the call's UTC time is in the window, the off-peak rate bills instead. */
+  off_peak?: OffPeak;
+}
+
+/** Off-peak rates + the UTC window they apply in. Minutes are minutes-of-day UTC
+ * in `[0, 1440)`; a window may wrap midnight (`start > end`). */
+export interface OffPeak {
+  input_usd_per_mtok?: number;
+  output_usd_per_mtok?: number;
+  window_start_utc_min?: number;
+  window_end_utc_min?: number;
+}
+
+/** True when `utcMin` (minutes-of-day UTC) falls in the off-peak window,
+ * handling a window that wraps past midnight. */
+export function offPeakActiveAt(op: OffPeak, utcMin: number): boolean {
+  const s = op.window_start_utc_min ?? 0;
+  const e = op.window_end_utc_min ?? 0;
+  return s <= e ? utcMin >= s && utcMin < e : utcMin >= s || utcMin < e;
 }
 
 export interface PricingCatalogJson {
@@ -87,6 +107,26 @@ export function validateModelPrice(
     warnings.push(`model "${modelId}": source is not a string, skipping field`);
     delete p.source;
   }
+  // Sanitize the optional off_peak block: drop it if not a well-formed object;
+  // otherwise keep only its finite-numeric fields.
+  if (p.off_peak !== undefined) {
+    const op = p.off_peak;
+    if (op === null || typeof op !== "object" || Array.isArray(op)) {
+      delete p.off_peak;
+    } else {
+      const o = op as Record<string, unknown>;
+      for (const k of [
+        "input_usd_per_mtok",
+        "output_usd_per_mtok",
+        "window_start_utc_min",
+        "window_end_utc_min",
+      ]) {
+        if (o[k] !== undefined && !(typeof o[k] === "number" && Number.isFinite(o[k] as number))) {
+          delete o[k];
+        }
+      }
+    }
+  }
   // Check that at least one rate field remains after cleaning.
   const hasRate = numericFields.some((f) => typeof p[f] === "number");
   if (!hasRate) {
@@ -104,6 +144,25 @@ export function priceCostIo(p: ModelPrice, tokensIn: number, tokensOut: number):
     return (tokensIn * inRate + tokensOut * outRate) / 1_000_000;
   }
   return ((p.usd_per_mtok ?? 0) * (tokensIn + tokensOut)) / 1_000_000;
+}
+
+/** Cost for an input/output split at a given UTC minute-of-day, charging the
+ * off-peak rate when its window is active, else the standard {@link priceCostIo}. */
+export function priceCostIoAt(
+  p: ModelPrice,
+  tokensIn: number,
+  tokensOut: number,
+  utcMin: number,
+): number {
+  const op = p.off_peak;
+  if (op && offPeakActiveAt(op, utcMin)) {
+    const i = op.input_usd_per_mtok ?? 0;
+    const o = op.output_usd_per_mtok ?? 0;
+    if (i > 0 || o > 0) {
+      return (tokensIn * i + tokensOut * o) / 1_000_000;
+    }
+  }
+  return priceCostIo(p, tokensIn, tokensOut);
 }
 
 /**
@@ -359,10 +418,17 @@ export class PricingCatalog {
     return undefined;
   }
 
-  /** Chargeback for a call. Unknown/unpriced model → $0 (never invent cost). */
-  cost(model: string, tokensIn: number, tokensOut: number): number {
+  /** Chargeback for a call. Unknown/unpriced model → $0 (never invent cost).
+   * Pass `atUtcMin` (minutes-of-day UTC) to charge a model's off-peak rate when
+   * the call falls in its time-of-day window. */
+  cost(model: string, tokensIn: number, tokensOut: number, atUtcMin?: number): number {
     const p = this.lookup(model);
-    return p ? priceCostIo(p, tokensIn, tokensOut) : 0;
+    if (!p) {
+      return 0;
+    }
+    return atUtcMin === undefined
+      ? priceCostIo(p, tokensIn, tokensOut)
+      : priceCostIoAt(p, tokensIn, tokensOut, atUtcMin);
   }
 
   /** True when the model has a non-zero rate (a paid cloud model). */

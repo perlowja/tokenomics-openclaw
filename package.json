@@ -1,6 +1,6 @@
 {
   "name": "@perlowja/tokenomics",
-  "version": "2026.6.11",
+  "version": "2026.6.29",
   "description": "Local-first LLM spend ledger and report (free-vs-paid, avoided/counterfactual) built on OpenClaw's per-call cost data.",
   "repository": {
     "type": "git",

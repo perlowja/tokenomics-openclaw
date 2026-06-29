@@ -24,6 +24,9 @@ function yearKey(d) {
 function hourKey(d) {
   return `${dayKey(d)} ${pad2(d.getUTCHours())}:00`;
 }
+function utcMinuteOfDay(d) {
+  return d.getUTCHours() * 60 + d.getUTCMinutes();
+}
 function isoWeek(d) {
   const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
   const dayNum = (date.getUTCDay() + 6) % 7;
@@ -413,7 +416,12 @@ function resolveCost(event, opts = {}) {
   if (free) {
     return 0;
   }
-  return opts.pricing ? opts.pricing.cost(event.model, event.tokensIn, event.tokensOut) : 0;
+  if (!opts.pricing) {
+    return 0;
+  }
+  const at = event.tsUtc ? new Date(event.tsUtc) : (opts.now ?? (() => /* @__PURE__ */ new Date()))();
+  const utcMin = Number.isNaN(at.getTime()) ? void 0 : utcMinuteOfDay(at);
+  return opts.pricing.cost(event.model, event.tokensIn, event.tokensOut, utcMin);
 }
 function toLedgerEntry(event, opts = {}) {
   const now = opts.now ?? (() => /* @__PURE__ */ new Date());
@@ -464,6 +472,11 @@ import {
   writeFileSync
 } from "node:fs";
 import { dirname as dirname2 } from "node:path";
+function offPeakActiveAt(op, utcMin) {
+  const s = op.window_start_utc_min ?? 0;
+  const e = op.window_end_utc_min ?? 0;
+  return s <= e ? utcMin >= s && utcMin < e : utcMin >= s || utcMin < e;
+}
 function priceIsPriced(p) {
   return (p.usd_per_mtok ?? 0) > 0 || (p.input_usd_per_mtok ?? 0) > 0 || (p.output_usd_per_mtok ?? 0) > 0;
 }
@@ -502,6 +515,24 @@ function validateModelPrice(modelId, raw) {
     warnings.push(`model "${modelId}": source is not a string, skipping field`);
     delete p.source;
   }
+  if (p.off_peak !== void 0) {
+    const op = p.off_peak;
+    if (op === null || typeof op !== "object" || Array.isArray(op)) {
+      delete p.off_peak;
+    } else {
+      const o = op;
+      for (const k of [
+        "input_usd_per_mtok",
+        "output_usd_per_mtok",
+        "window_start_utc_min",
+        "window_end_utc_min"
+      ]) {
+        if (o[k] !== void 0 && !(typeof o[k] === "number" && Number.isFinite(o[k]))) {
+          delete o[k];
+        }
+      }
+    }
+  }
   const hasRate = numericFields.some((f) => typeof p[f] === "number");
   if (!hasRate) {
     warnings.push(`model "${modelId}": no valid rate fields remain, skipping model`);
@@ -516,6 +547,17 @@ function priceCostIo(p, tokensIn, tokensOut) {
     return (tokensIn * inRate + tokensOut * outRate) / 1e6;
   }
   return (p.usd_per_mtok ?? 0) * (tokensIn + tokensOut) / 1e6;
+}
+function priceCostIoAt(p, tokensIn, tokensOut, utcMin) {
+  const op = p.off_peak;
+  if (op && offPeakActiveAt(op, utcMin)) {
+    const i = op.input_usd_per_mtok ?? 0;
+    const o = op.output_usd_per_mtok ?? 0;
+    if (i > 0 || o > 0) {
+      return (tokensIn * i + tokensOut * o) / 1e6;
+    }
+  }
+  return priceCostIo(p, tokensIn, tokensOut);
 }
 function isPosixPlatform() {
   return process.platform !== "win32";
@@ -683,10 +725,15 @@ var PricingCatalog = class _PricingCatalog {
     }
     return void 0;
   }
-  /** Chargeback for a call. Unknown/unpriced model → $0 (never invent cost). */
-  cost(model, tokensIn, tokensOut) {
+  /** Chargeback for a call. Unknown/unpriced model → $0 (never invent cost).
+   * Pass `atUtcMin` (minutes-of-day UTC) to charge a model's off-peak rate when
+   * the call falls in its time-of-day window. */
+  cost(model, tokensIn, tokensOut, atUtcMin) {
     const p = this.lookup(model);
-    return p ? priceCostIo(p, tokensIn, tokensOut) : 0;
+    if (!p) {
+      return 0;
+    }
+    return atUtcMin === void 0 ? priceCostIo(p, tokensIn, tokensOut) : priceCostIoAt(p, tokensIn, tokensOut, atUtcMin);
   }
   /** True when the model has a non-zero rate (a paid cloud model). */
   isBilled(model) {

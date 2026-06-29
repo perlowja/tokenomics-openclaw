@@ -11,6 +11,7 @@
 
 import { Ledger, type LedgerEntry } from "./ledger.js";
 import type { PricingCatalog } from "./pricing.js";
+import { utcMinuteOfDay } from "./time.js";
 
 /** Host-neutral record of one model call, before it becomes a ledger row. */
 export interface UsageEvent {
@@ -52,7 +53,14 @@ export function resolveCost(event: UsageEvent, opts: IngestOptions = {}): number
   if (free) {
     return 0;
   }
-  return opts.pricing ? opts.pricing.cost(event.model, event.tokensIn, event.tokensOut) : 0;
+  if (!opts.pricing) {
+    return 0;
+  }
+  // Price against the call's own UTC time so a model's off-peak (time-of-day)
+  // window bills the discounted rate. tsUtc when supplied, else the injected/real clock.
+  const at = event.tsUtc ? new Date(event.tsUtc) : (opts.now ?? (() => new Date()))();
+  const utcMin = Number.isNaN(at.getTime()) ? undefined : utcMinuteOfDay(at);
+  return opts.pricing.cost(event.model, event.tokensIn, event.tokensOut, utcMin);
 }
 
 /** Normalize a {@link UsageEvent} into a persisted {@link LedgerEntry}. */

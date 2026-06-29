@@ -43,6 +43,8 @@ import {
   validatePricingFile,
   getProcessUid,
   isPosixPlatform,
+  offPeakActiveAt,
+  priceCostIoAt,
 } from "./pricing.js";
 import { renderReport, shareBar } from "./render.js";
 import { buildReport, parseGran } from "./report.js";
@@ -1539,5 +1541,37 @@ describe("FinOps observability (finops.ts)", () => {
     expect(rep.advisor.every((a) => a.potential_savings_usd >= 0)).toBe(true);
     // Burn forecast saw at least one day of data.
     expect(rep.forecast.sample_days).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("off-peak (time-of-day) pricing", () => {
+  const deepseek = {
+    input_usd_per_mtok: 0.28,
+    output_usd_per_mtok: 0.42,
+    off_peak: {
+      input_usd_per_mtok: 0.14,
+      output_usd_per_mtok: 0.21,
+      window_start_utc_min: 990, // 16:30 UTC
+      window_end_utc_min: 30, // 00:30 UTC (wraps midnight)
+    },
+  };
+
+  it("offPeakActiveAt handles a window that wraps midnight", () => {
+    const op = deepseek.off_peak;
+    expect(offPeakActiveAt(op, 990)).toBe(true); // start, inclusive
+    expect(offPeakActiveAt(op, 1200)).toBe(true); // inside (20:00)
+    expect(offPeakActiveAt(op, 0)).toBe(true); // past midnight
+    expect(offPeakActiveAt(op, 29)).toBe(true); // 00:29
+    expect(offPeakActiveAt(op, 30)).toBe(false); // end, exclusive
+    expect(offPeakActiveAt(op, 600)).toBe(false); // daytime peak
+    expect(offPeakActiveAt(op, 989)).toBe(false); // just before
+  });
+
+  it("priceCostIoAt charges off-peak in window, standard otherwise", () => {
+    // 1M in + 1M out: peak = 0.28 + 0.42 = 0.70; off-peak = 0.14 + 0.21 = 0.35.
+    expect(priceCostIoAt(deepseek, 1_000_000, 1_000_000, 600)).toBeCloseTo(0.7, 9);
+    expect(priceCostIoAt(deepseek, 1_000_000, 1_000_000, 1200)).toBeCloseTo(0.35, 9);
+    // No off_peak block → always standard.
+    expect(priceCostIoAt({ input_usd_per_mtok: 1 }, 1_000_000, 0, 1200)).toBeCloseTo(1, 9);
   });
 });

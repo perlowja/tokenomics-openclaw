@@ -27,6 +27,11 @@ export function hourKey(d: Date): string {
   return `${dayKey(d)} ${pad2(d.getUTCHours())}:00`;
 }
 
+/** Minute-of-day in UTC `[0, 1440)`, for time-of-day (off-peak) pricing windows. */
+export function utcMinuteOfDay(d: Date): number {
+  return d.getUTCHours() * 60 + d.getUTCMinutes();
+}
+
 /**
  * ISO-8601 week-year + week number for `d` (UTC), formatted `YYYY-Www`. The
  * week-year can differ from the calendar year near January/December (e.g.
