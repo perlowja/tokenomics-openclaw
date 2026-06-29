@@ -288,8 +288,132 @@ function buildFinOpsReport(ledger, pricing, opts) {
   };
 }
 
+// src/subscriptions.ts
+import { readFileSync } from "node:fs";
+var APPROACHING_THRESHOLD = 0.8;
+function unitAmount(e, unit) {
+  return unit === "tokens" ? e.tokens_in + e.tokens_out : 1;
+}
+function windowUsage(entries, provider, w, now = /* @__PURE__ */ new Date()) {
+  const unit = w.unit ?? "tokens";
+  const nowMs = now.getTime();
+  const sinceMs = nowMs - w.hours * 36e5;
+  let used = 0;
+  let oldestMs;
+  for (const e of entries) {
+    if (e.provider !== provider) {
+      continue;
+    }
+    const t = Date.parse(e.ts_utc);
+    if (Number.isNaN(t) || t < sinceMs || t > nowMs) {
+      continue;
+    }
+    used += unitAmount(e, unit);
+    oldestMs = oldestMs === void 0 ? t : Math.min(oldestMs, t);
+  }
+  const pct = w.cap > 0 ? used / w.cap : 0;
+  const nextResetUtc = oldestMs === void 0 ? void 0 : new Date(oldestMs + w.hours * 36e5).toISOString();
+  return {
+    name: w.name,
+    hours: w.hours,
+    unit,
+    used,
+    cap: w.cap,
+    pct,
+    nextResetUtc,
+    approaching: pct >= APPROACHING_THRESHOLD
+  };
+}
+function planUsage(entries, plan, now = /* @__PURE__ */ new Date()) {
+  return plan.windows.map((w) => windowUsage(entries, plan.provider, w, now));
+}
+function amortizedPerCall(entries, plan, now = /* @__PURE__ */ new Date()) {
+  const fee = plan.monthly_fee_usd ?? 0;
+  if (fee <= 0) {
+    return 0;
+  }
+  const sinceMs = now.getTime() - 30 * 864e5;
+  let calls = 0;
+  for (const e of entries) {
+    if (e.provider === plan.provider && Date.parse(e.ts_utc) >= sinceMs) {
+      calls += 1;
+    }
+  }
+  return calls === 0 ? 0 : fee / calls;
+}
+function buildSubscriptionReport(entries, config, now = /* @__PURE__ */ new Date()) {
+  return {
+    generated: now.toISOString(),
+    providers: config.plans.map((plan) => ({
+      provider: plan.provider,
+      windows: planUsage(entries, plan, now),
+      amortized_per_call_usd: amortizedPerCall(entries, plan, now)
+    }))
+  };
+}
+function sanitizeSubscriptions(raw) {
+  const out = { plans: [] };
+  if (raw === null || typeof raw !== "object") {
+    return out;
+  }
+  const plans = raw.plans;
+  if (!Array.isArray(plans)) {
+    return out;
+  }
+  for (const p of plans) {
+    if (p === null || typeof p !== "object") {
+      continue;
+    }
+    const provider = p.provider;
+    const windowsRaw = p.windows;
+    if (typeof provider !== "string" || !Array.isArray(windowsRaw)) {
+      continue;
+    }
+    const windows = [];
+    for (const w of windowsRaw) {
+      if (w === null || typeof w !== "object") {
+        continue;
+      }
+      const ww = w;
+      if (typeof ww.name === "string" && typeof ww.hours === "number" && Number.isFinite(ww.hours) && ww.hours > 0 && typeof ww.cap === "number" && Number.isFinite(ww.cap) && ww.cap >= 0) {
+        const unit = ww.unit;
+        windows.push({
+          name: ww.name,
+          hours: ww.hours,
+          cap: ww.cap,
+          unit: unit === "requests" || unit === "messages" || unit === "tokens" ? unit : "tokens"
+        });
+      }
+    }
+    if (windows.length === 0) {
+      continue;
+    }
+    const fee = p.monthly_fee_usd;
+    out.plans.push({
+      provider,
+      windows,
+      monthly_fee_usd: typeof fee === "number" && Number.isFinite(fee) && fee >= 0 ? fee : 0
+    });
+  }
+  return out;
+}
+function loadSubscriptions(path, logger) {
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return { plans: [] };
+  }
+  try {
+    return sanitizeSubscriptions(JSON.parse(raw));
+  } catch (err) {
+    logger?.(`tokenomics: subscriptions config at ${path} is not valid JSON; ignoring (${err})`);
+    return { plans: [] };
+  }
+}
+
 // src/ledger.ts
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync as readFileSync2 } from "node:fs";
 import { dirname } from "node:path";
 var PERIOD_KEYS = {
   day: dayKey,
@@ -333,7 +457,7 @@ var Ledger = class {
   entries() {
     let raw;
     try {
-      raw = readFileSync(this.path, "utf8");
+      raw = readFileSync2(this.path, "utf8");
     } catch {
       return [];
     }
@@ -466,7 +590,7 @@ import {
   fstatSync,
   mkdirSync as mkdirSync2,
   openSync,
-  readFileSync as readFileSync2,
+  readFileSync as readFileSync3,
   renameSync,
   statSync,
   writeFileSync
@@ -644,7 +768,7 @@ var PricingCatalog = class _PricingCatalog {
       }
       let raw;
       try {
-        raw = readFileSync2(fd, { encoding: "utf8" });
+        raw = readFileSync3(fd, { encoding: "utf8" });
       } catch {
         return cat;
       }
@@ -949,6 +1073,7 @@ function buildReport(opts) {
 var SUBDIR = "tokenomics";
 var LEDGER_FILE = "ledger.jsonl";
 var PRICING_FILE = "pricing.json";
+var SUBSCRIPTIONS_FILE = "subscriptions.json";
 var DAY_MS2 = 864e5;
 var DEFAULT_WINDOW_DAYS = 30;
 function numericValue(value) {
@@ -1011,6 +1136,7 @@ function resolveWindow(params) {
 function createTokenomicsService() {
   let ledgerPath;
   let pricingPath;
+  let subscriptionsPath;
   let adapter;
   let unsubscribe;
   let warn;
@@ -1094,6 +1220,18 @@ function createTokenomicsService() {
       res.end(JSON.stringify(finOpsReportFor(window)));
       return true;
     }
+    if (url.searchParams.get("view") === "quota") {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      if (req.method === "HEAD") {
+        res.end();
+        return true;
+      }
+      const subs = loadSubscriptions(subscriptionsPath ?? "", warn);
+      res.end(JSON.stringify(buildSubscriptionReport(openLedger().entries(), subs)));
+      return true;
+    }
     const format = url.searchParams.get("format") ?? "json";
     const report = reportFor(window, url.searchParams);
     if (format === "text") {
@@ -1123,6 +1261,7 @@ function createTokenomicsService() {
       const dir = join(ctx.stateDir, SUBDIR);
       ledgerPath = join(dir, LEDGER_FILE);
       pricingPath = join(dir, PRICING_FILE);
+      subscriptionsPath = join(dir, SUBSCRIPTIONS_FILE);
       warn = (msg) => ctx.logger.warn(msg);
       const pricing = PricingCatalog.load(pricingPath, { logger: warn });
       adapter = new HostAdapter(ledgerPath, "openclaw", { pricing });

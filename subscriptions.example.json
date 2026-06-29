@@ -1,0 +1,26 @@
+{
+  "_comment": "Copy to <stateDir>/tokenomics/subscriptions.json and edit to your plans. Each plan declares rolling windows (name, hours, unit: tokens|requests|messages, cap). Usage is measured from the local ledger; the ?view=quota route reports used/cap, when each window next frees, and an 'approaching' flag at >=80%. Caps below are ILLUSTRATIVE — set them to your actual subscription limits. There is no universal provider API for live plan quota (Anthropic/OpenAI expose rate-limit response headers + Admin-key usage APIs; MiniMax's Token Plan is dashboard-only with 5h+weekly windows), so config + ledger is the portable source of truth.",
+  "plans": [
+    {
+      "provider": "minimax",
+      "monthly_fee_usd": 10,
+      "windows": [
+        { "name": "5h", "hours": 5, "unit": "tokens", "cap": 20000000 },
+        { "name": "weekly", "hours": 168, "unit": "tokens", "cap": 500000000 }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "monthly_fee_usd": 100,
+      "windows": [
+        { "name": "5h", "hours": 5, "unit": "messages", "cap": 900 },
+        { "name": "weekly", "hours": 168, "unit": "messages", "cap": 8000 }
+      ]
+    },
+    {
+      "provider": "openai",
+      "monthly_fee_usd": 20,
+      "windows": [{ "name": "3h", "hours": 3, "unit": "messages", "cap": 300 }]
+    }
+  ]
+}

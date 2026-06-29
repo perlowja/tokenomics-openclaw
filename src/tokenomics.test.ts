@@ -46,6 +46,11 @@ import {
   offPeakActiveAt,
   priceCostIoAt,
 } from "./pricing.js";
+import {
+  buildSubscriptionReport,
+  sanitizeSubscriptions,
+  windowUsage,
+} from "./subscriptions.js";
 import { renderReport, shareBar } from "./render.js";
 import { buildReport, parseGran } from "./report.js";
 import { createTokenomicsService, testApi, toUsageEvent } from "./service.js";
@@ -1573,5 +1578,67 @@ describe("off-peak (time-of-day) pricing", () => {
     expect(priceCostIoAt(deepseek, 1_000_000, 1_000_000, 1200)).toBeCloseTo(0.35, 9);
     // No off_peak block → always standard.
     expect(priceCostIoAt({ input_usd_per_mtok: 1 }, 1_000_000, 0, 1200)).toBeCloseTo(1, 9);
+  });
+});
+
+describe("subscription quota (config + ledger)", () => {
+  const now = new Date("2026-06-29T20:00:00.000Z");
+  const mk = (provider: string, tokensIn: number, tokensOut: number, tsUtc: string) => ({
+    ts_utc: tsUtc,
+    provider,
+    model: "m",
+    tokens_in: tokensIn,
+    tokens_out: tokensOut,
+    cost_usd: 0,
+  });
+
+  it("windowUsage sums in-window usage, flags approaching, computes next reset", () => {
+    const entries = [
+      mk("minimax", 4_000_000, 0, "2026-06-29T17:00:00.000Z"), // 3h ago, in 5h window
+      mk("minimax", 5_000_000, 0, "2026-06-29T19:30:00.000Z"), // 30m ago, in window
+      mk("minimax", 9_000_000, 0, "2026-06-29T10:00:00.000Z"), // 10h ago, OUT of 5h window
+      mk("openai", 9_000_000, 0, "2026-06-29T19:00:00.000Z"), // other provider
+    ];
+    const w = { name: "5h", hours: 5, unit: "tokens" as const, cap: 10_000_000 };
+    const u = windowUsage(entries, "minimax", w, now);
+    expect(u.used).toBe(9_000_000); // 4M + 5M; the 10h-old and openai rows excluded
+    expect(u.pct).toBeCloseTo(0.9, 9);
+    expect(u.approaching).toBe(true); // >= 0.8
+    // Oldest in-window call is 17:00 → frees at 17:00 + 5h = 22:00Z.
+    expect(u.nextResetUtc).toBe("2026-06-29T22:00:00.000Z");
+  });
+
+  it("empty window has no reset and is not approaching", () => {
+    const u = windowUsage([], "minimax", { name: "5h", hours: 5, cap: 100 }, now);
+    expect(u.used).toBe(0);
+    expect(u.nextResetUtc).toBeUndefined();
+    expect(u.approaching).toBe(false);
+  });
+
+  it("buildSubscriptionReport covers every configured plan/provider", () => {
+    const cfg = sanitizeSubscriptions({
+      plans: [
+        {
+          provider: "minimax",
+          monthly_fee_usd: 10,
+          windows: [{ name: "5h", hours: 5, unit: "tokens", cap: 1000 }],
+        },
+        { provider: "bad", windows: [] }, // dropped: no valid windows
+      ],
+    });
+    expect(cfg.plans).toHaveLength(1);
+    const rep = buildSubscriptionReport([mk("minimax", 600, 0, now.toISOString())], cfg, now);
+    expect(rep.providers).toHaveLength(1);
+    expect(rep.providers[0].provider).toBe("minimax");
+    expect(rep.providers[0].windows[0].used).toBe(600);
+  });
+
+  it("sanitizeSubscriptions drops malformed input safely", () => {
+    expect(sanitizeSubscriptions(null).plans).toHaveLength(0);
+    expect(sanitizeSubscriptions({ plans: "nope" }).plans).toHaveLength(0);
+    expect(
+      sanitizeSubscriptions({ plans: [{ provider: "x", windows: [{ name: "w", hours: -1, cap: 5 }] }] })
+        .plans,
+    ).toHaveLength(0); // bad hours → no valid window → plan dropped
   });
 });

@@ -14,6 +14,7 @@ import {
   type OpenClawPluginServiceContext,
 } from "../api.js";
 import { buildFinOpsReport, type FinOpsReport } from "./finops.js";
+import { buildSubscriptionReport, loadSubscriptions } from "./subscriptions.js";
 import { HostAdapter, type UsageEvent } from "./host-adapter.js";
 import { Ledger } from "./ledger.js";
 import { PricingCatalog } from "./pricing.js";
@@ -38,6 +39,10 @@ export interface ModelUsageLike {
 const SUBDIR = "tokenomics";
 const LEDGER_FILE = "ledger.jsonl";
 const PRICING_FILE = "pricing.json";
+// Operator-declared subscription plans (provider + rolling windows + caps). The
+// `?view=quota` route reports how much of each window is consumed, when it next
+// frees, and whether it is approaching the cap. Edit this file to configure.
+const SUBSCRIPTIONS_FILE = "subscriptions.json";
 const DAY_MS = 86_400_000;
 const DEFAULT_WINDOW_DAYS = 30;
 
@@ -128,6 +133,7 @@ function resolveWindow(params: URLSearchParams): Window | { error: string } {
 export function createTokenomicsService() {
   let ledgerPath: string | undefined;
   let pricingPath: string | undefined;
+  let subscriptionsPath: string | undefined;
   let adapter: HostAdapter | undefined;
   let unsubscribe: (() => void) | undefined;
   let warn: ((msg: string) => void) | undefined;
@@ -243,6 +249,20 @@ export function createTokenomicsService() {
       res.end(JSON.stringify(finOpsReportFor(window)));
       return true;
     }
+    if (url.searchParams.get("view") === "quota") {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      if (req.method === "HEAD") {
+        res.end();
+        return true;
+      }
+      // Subscription rolling-window usage from operator-declared plans. The
+      // ledger is the source; configure plans in subscriptions.json.
+      const subs = loadSubscriptions(subscriptionsPath ?? "", warn);
+      res.end(JSON.stringify(buildSubscriptionReport(openLedger().entries(), subs)));
+      return true;
+    }
     const format = url.searchParams.get("format") ?? "json";
     const report = reportFor(window, url.searchParams);
     if (format === "text") {
@@ -273,6 +293,7 @@ export function createTokenomicsService() {
       const dir = join(ctx.stateDir, SUBDIR);
       ledgerPath = join(dir, LEDGER_FILE);
       pricingPath = join(dir, PRICING_FILE);
+      subscriptionsPath = join(dir, SUBSCRIPTIONS_FILE);
       warn = (msg) => ctx.logger.warn(msg);
       const pricing = PricingCatalog.load(pricingPath, { logger: warn });
       adapter = new HostAdapter(ledgerPath, "openclaw", { pricing });
