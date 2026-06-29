@@ -1,6 +1,6 @@
 {
   "name": "@perlowja/tokenomics",
-  "version": "2026.6.10",
+  "version": "2026.6.11",
   "description": "Local-first LLM spend ledger and report (free-vs-paid, avoided/counterfactual) built on OpenClaw's per-call cost data.",
   "repository": {
     "type": "git",
@@ -22,7 +22,7 @@
       "clawhubSpec": "clawhub:@perlowja/tokenomics",
       "npmSpec": "@perlowja/tokenomics",
       "defaultChoice": "npm",
-      "minHostVersion": ">=2026.4.25"
+      "minHostVersion": ">=2026.6.10"
     },
     "compat": {
       "pluginApi": ">=2026.6.10"

@@ -1079,10 +1079,22 @@ function createTokenomicsService() {
       warn = (msg) => ctx.logger.warn(msg);
       const pricing = PricingCatalog.load(pricingPath, { logger: warn });
       adapter = new HostAdapter(ledgerPath, "openclaw", { pricing });
+      const modelUsage = ctx.modelUsage;
+      if (modelUsage) {
+        unsubscribe = modelUsage.onEvent((event) => {
+          try {
+            recordUsage(event);
+          } catch (err) {
+            ctx.logger.error(`tokenomics: failed to record usage event: ${safeErrorMessage(err)}`);
+          }
+        });
+        ctx.logger.info(`tokenomics: recording model spend to ${ledgerPath} (modelUsage stream)`);
+        return;
+      }
       const subscribe = ctx.internalDiagnostics?.onEvent;
       if (!subscribe) {
         ctx.logger.error(
-          "tokenomics: internal diagnostics capability unavailable; spend will not be recorded"
+          "tokenomics: no model-usage capability (ctx.modelUsage or internalDiagnostics) available; spend will not be recorded"
         );
         return;
       }
@@ -1096,7 +1108,7 @@ function createTokenomicsService() {
           ctx.logger.error(`tokenomics: failed to record usage event: ${safeErrorMessage(err)}`);
         }
       });
-      ctx.logger.info(`tokenomics: recording model spend to ${ledgerPath}`);
+      ctx.logger.info(`tokenomics: recording model spend to ${ledgerPath} (diagnostics fallback)`);
     },
     stop() {
       unsubscribe?.();
